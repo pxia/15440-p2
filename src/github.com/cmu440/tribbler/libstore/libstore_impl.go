@@ -9,9 +9,11 @@ import (
 )
 
 var (
-	KeyError = errors.New("Key Error")
-	// ItemExistsError   = errors.New("Item exists")
-	// ItemNotFoundError = errors.New("Item not found")
+	KeyError          = errors.New("Key Error")
+	ItemExistsError   = errors.New("Item exists")
+	ItemNotFoundError = errors.New("Item not found")
+	RoutingError      = errors.New("Routing Error")
+	ProtocolError     = errors.New("Protocol Error")
 )
 
 type libstore struct {
@@ -74,7 +76,17 @@ func (ls *libstore) Get(key string) (string, error) {
 		return "", KeyError
 	}
 
-	return reply.Value, nil
+	switch reply.Status {
+	case storagerpc.OK:
+		return reply.Value, nil
+	case storagerpc.KeyNotFound:
+		return "", KeyError
+	case storagerpc.WrongServer:
+		return "", RoutingError
+	default:
+		return "", ProtocolError
+	}
+
 }
 
 func (ls *libstore) Put(key, value string) error {
@@ -88,11 +100,14 @@ func (ls *libstore) Put(key, value string) error {
 		return err
 	}
 
-	if reply.Status != storagerpc.OK {
-		return KeyError
+	switch reply.Status {
+	case storagerpc.OK:
+		return nil
+	case storagerpc.WrongServer:
+		return RoutingError
+	default:
+		return ProtocolError
 	}
-
-	return nil
 }
 
 func (ls *libstore) Delete(key string) error {
@@ -105,8 +120,15 @@ func (ls *libstore) Delete(key string) error {
 		return err
 	}
 
-	if reply.Status != storagerpc.OK {
+	switch reply.Status {
+	case storagerpc.OK:
+		return nil
+	case storagerpc.WrongServer:
+		return RoutingError
+	case storagerpc.KeyNotFound:
 		return KeyError
+	default:
+		return ProtocolError
 	}
 
 	return nil
@@ -124,11 +146,17 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 		return nil, err
 	}
 
-	if reply.Status != storagerpc.OK {
+	switch reply.Status {
+	case storagerpc.OK:
+		return reply.Value, nil
+	case storagerpc.WrongServer:
+		return nil, RoutingError
+	case storagerpc.KeyNotFound:
 		return nil, KeyError
+	default:
+		return nil, ProtocolError
 	}
 
-	return reply.Value, nil
 }
 
 func (ls *libstore) RemoveFromList(key, removeItem string) error {
@@ -142,12 +170,20 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 		return err
 	}
 
-	// hanle item not found
 	if reply.Status != storagerpc.OK {
 		return KeyError
 	}
 
-	return nil
+	switch reply.Status {
+	case storagerpc.OK:
+		return nil
+	case storagerpc.WrongServer:
+		return RoutingError
+	case storagerpc.ItemNotFound:
+		return ItemNotFoundError
+	default:
+		return ProtocolError
+	}
 }
 
 func (ls *libstore) AppendToList(key, newItem string) error {
@@ -161,12 +197,20 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 		return err
 	}
 
-	// handle item exists
 	if reply.Status != storagerpc.OK {
 		return KeyError
 	}
 
-	return nil
+	switch reply.Status {
+	case storagerpc.OK:
+		return nil
+	case storagerpc.WrongServer:
+		return RoutingError
+	case storagerpc.ItemExists:
+		return ItemExistsError
+	default:
+		return ProtocolError
+	}
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
