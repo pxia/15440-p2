@@ -12,14 +12,14 @@ var (
 	KeyError          = errors.New("Key Error")
 	ItemExistsError   = errors.New("Item exists")
 	ItemNotFoundError = errors.New("Item not found")
-	RoutingError      = errors.New("Routing Error")
-	ProtocolError     = errors.New("Protocol Error")
+	// these will cause panic!
+	RoutingError  = errors.New("Routing Error")
+	ProtocolError = errors.New("Protocol Error")
 )
 
 type libstore struct {
 	storageServer *rpc.Client
 	myHostPort    string
-	// TODO: implement this!
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -170,10 +170,6 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 		return err
 	}
 
-	if reply.Status != storagerpc.OK {
-		return KeyError
-	}
-
 	switch reply.Status {
 	case storagerpc.OK:
 		return nil
@@ -197,10 +193,6 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 		return err
 	}
 
-	if reply.Status != storagerpc.OK {
-		return KeyError
-	}
-
 	switch reply.Status {
 	case storagerpc.OK:
 		return nil
@@ -215,4 +207,8 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
 	return errors.New("not implemented")
+}
+
+func NotDataError(e error) bool {
+	return e != nil && e != KeyError && e != ItemExistsError && e != ItemNotFoundError
 }
