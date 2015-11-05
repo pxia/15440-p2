@@ -1,7 +1,6 @@
 package storageserver
 
 import (
-	"errors"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -11,8 +10,11 @@ import (
 )
 
 type storageServer struct {
-	chicken map[string]string
-	duck    map[string]map[string]bool
+	numNodes    int
+	joinedNodes int
+	nodes       []storagerpc.Node
+	chicken     map[string]string
+	duck        map[string]map[string]bool
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -43,6 +45,9 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
+	storageServer.numNodes = numNodes
+	storageServer.nodes = make([]storagerpc.Node, numNodes)
+	storageServer.joinedNodes = 1 // self
 	storageServer.chicken = make(map[string]string)
 	storageServer.duck = make(map[string]map[string]bool)
 
@@ -50,11 +55,35 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 }
 
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	return errors.New("not implemented")
+	ss.nodes[ss.joinedNodes] = args.ServerInfo
+	ss.joinedNodes++
+	if ss.joinedNodes == ss.numNodes {
+		*reply = storagerpc.RegisterReply{
+			Status:  storagerpc.OK,
+			Servers: ss.nodes,
+		}
+	} else {
+		*reply = storagerpc.RegisterReply{
+			Status:  storagerpc.NotReady,
+			Servers: ss.nodes,
+		}
+	}
+	return nil
 }
 
 func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *storagerpc.GetServersReply) error {
-	return errors.New("not implemented")
+	if ss.joinedNodes == ss.numNodes {
+		*reply = storagerpc.GetServersReply{
+			Status:  storagerpc.OK,
+			Servers: ss.nodes,
+		}
+	} else {
+		*reply = storagerpc.GetServersReply{
+			Status:  storagerpc.NotReady,
+			Servers: ss.nodes,
+		}
+	}
+	return nil
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
