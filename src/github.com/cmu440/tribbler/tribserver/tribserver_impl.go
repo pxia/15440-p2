@@ -2,7 +2,7 @@ package tribserver
 
 import (
 	"encoding/json"
-	"errors"
+	// "errors"
 	// "fmt"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
@@ -248,9 +248,14 @@ func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *trib
 		return nil
 	}
 
-	if err := ts.libStore.RemoveFromList(args.UserID, args.PostKey); err == libstore.ItemNotFoundError {
+	if err := ts.libStore.RemoveFromList(util.FormatTribListKey(args.UserID), args.PostKey); err == libstore.ItemNotFoundError {
 		*reply = tribrpc.DeleteTribbleReply{
 			Status: tribrpc.NoSuchPost,
+		}
+		return nil
+	} else if err == libstore.KeyError {
+		*reply = tribrpc.DeleteTribbleReply{
+			Status: tribrpc.OK,
 		}
 		return nil
 	} else if err != nil {
@@ -356,7 +361,68 @@ func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.
 }
 
 func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
-	return errors.New("not implemented")
+	if t, err := ts.userNotFound(args.UserID); err != nil {
+		return err
+	} else if t {
+		*reply = tribrpc.GetTribblesReply{
+			Status: tribrpc.NoSuchUser,
+		}
+		return nil
+	}
+
+	var subs []string
+	if list, err := ts.libStore.GetList(util.FormatSubListKey(args.UserID)); err == libstore.KeyError {
+		// sliently ignore
+		subs = make([]string, 0)
+	} else if err != nil {
+		return err
+	} else {
+		subs = list
+	}
+
+	var postKeys []string
+	for _, sub := range subs {
+		if list, err := ts.libStore.GetList(util.FormatTribListKey(sub)); err == libstore.KeyError {
+		} else if err != nil {
+			return err
+		} else {
+			postKeys = append(postKeys, list...)
+		}
+	}
+
+	tribbleStrings := make([]string, len(postKeys))
+	i := 0
+	for _, key := range postKeys {
+		if s, err := ts.libStore.Get(key); err != nil {
+			return err
+		} else {
+			tribbleStrings[i] = s
+		}
+		i++
+	}
+
+	var tribbleList Tribbles
+	if list, err := TribblesStringsToObject(tribbleStrings); err != nil {
+		return err
+	} else {
+		tribbleList = list
+	}
+
+	sort.Sort(tribbleList)
+	// fmt.Println(len(tribbleList))
+	if len(tribbleList) > 100 {
+		*reply = tribrpc.GetTribblesReply{
+			Status:   tribrpc.OK,
+			Tribbles: tribbleList[:100],
+		}
+	} else {
+		*reply = tribrpc.GetTribblesReply{
+			Status:   tribrpc.OK,
+			Tribbles: tribbleList,
+		}
+		// return tribbleList
+	}
+	return nil
 }
 
 func (ts *tribServer) userNotFound(UserID string) (bool, error) {
