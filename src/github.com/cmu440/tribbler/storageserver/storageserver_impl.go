@@ -2,12 +2,17 @@ package storageserver
 
 import (
 	"errors"
+	"net"
+	"net/http"
+	"net/rpc"
+	"strconv"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
 type storageServer struct {
-	// TODO: implement this!
+	chicken map[string]string
+	duck    map[string]map[string]bool
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -19,7 +24,29 @@ type storageServer struct {
 // This function should return only once all storage servers have joined the ring,
 // and should return a non-nil error if the storage server could not be started.
 func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID uint32) (StorageServer, error) {
-	return nil, errors.New("not implemented")
+	storageServer := new(storageServer)
+
+	// Create the server socket that will listen for incoming RPCs.
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the tribServer before registering it for RPC.
+	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(storageServer))
+	if err != nil {
+		return nil, err
+	}
+
+	// Setup the HTTP handler that will server incoming RPCs and
+	// serve requests in a background goroutine.
+	rpc.HandleHTTP()
+	go http.Serve(listener, nil)
+
+	storageServer.chicken = make(map[string]string)
+	storageServer.duck = make(map[string]map[string]bool)
+
+	return storageServer, nil
 }
 
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
@@ -31,25 +58,105 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	return errors.New("not implemented")
+	if v, ok := ss.chicken[args.Key]; !ok {
+		*reply = storagerpc.GetReply{
+			Status: storagerpc.KeyNotFound,
+			Value:  "",
+		}
+	} else {
+		*reply = storagerpc.GetReply{
+			Status: storagerpc.OK,
+			Value:  v,
+		}
+	}
+	return nil
 }
 
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	return errors.New("not implemented")
+	if _, ok := ss.chicken[args.Key]; !ok {
+		*reply = storagerpc.DeleteReply{
+			Status: storagerpc.KeyNotFound,
+		}
+	} else {
+		delete(ss.chicken, args.Key)
+		*reply = storagerpc.DeleteReply{
+			Status: storagerpc.OK,
+		}
+	}
+	return nil
+}
+
+func Keys(m map[string]bool) []string {
+	keys := make([]string, len(m))
+
+	i := 0
+	for k := range m {
+		keys[i] = k
+		i++
+	}
+	return keys
 }
 
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
-	return errors.New("not implemented")
+	if v, ok := ss.duck[args.Key]; !ok {
+		*reply = storagerpc.GetListReply{
+			Status: storagerpc.KeyNotFound,
+			Value:  nil,
+		}
+	} else {
+		*reply = storagerpc.GetListReply{
+			Status: storagerpc.OK,
+			Value:  Keys(v),
+		}
+	}
+	return nil
 }
 
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	ss.chicken[args.Key] = args.Value
+	*reply = storagerpc.PutReply{
+		Status: storagerpc.OK,
+	}
+	return nil
 }
 
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	if _, ok := ss.duck[args.Key]; !ok {
+		ss.duck[args.Key] = make(map[string]bool)
+	}
+
+	if _, ok := ss.duck[args.Key][args.Value]; ok {
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.ItemExists,
+		}
+		return nil
+	}
+
+	ss.duck[args.Key][args.Value] = false
+	*reply = storagerpc.PutReply{
+		Status: storagerpc.OK,
+	}
+	return nil
 }
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	if _, ok := ss.duck[args.Key]; !ok {
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.ItemNotFound,
+		}
+		return nil
+	}
+
+	if _, ok := ss.duck[args.Key][args.Value]; !ok {
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.ItemNotFound,
+		}
+		return nil
+	}
+
+	delete(ss.duck[args.Key], args.Value)
+	*reply = storagerpc.PutReply{
+		Status: storagerpc.OK,
+	}
+	return nil
 }
