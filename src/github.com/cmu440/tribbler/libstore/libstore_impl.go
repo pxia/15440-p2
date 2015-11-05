@@ -2,10 +2,10 @@ package libstore
 
 import (
 	"errors"
-	"net/rpc"
-
+	"fmt"
 	"github.com/cmu440/tribbler/rpc/librpc"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"net/rpc"
 )
 
 var (
@@ -128,6 +128,7 @@ func (ls *libstore) Delete(key string) error {
 	case storagerpc.KeyNotFound:
 		return KeyError
 	default:
+		fmt.Println(reply.Status)
 		return ProtocolError
 	}
 
@@ -177,7 +178,14 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 		return RoutingError
 	case storagerpc.ItemNotFound:
 		return ItemNotFoundError
+	case storagerpc.KeyNotFound:
+		return KeyError
 	default:
+		fmt.Println(reply.Status)
+		fmt.Println(storagerpc.KeyNotFound)
+		fmt.Println(storagerpc.ItemNotFound)
+		fmt.Println(storagerpc.WrongServer)
+
 		return ProtocolError
 	}
 }
