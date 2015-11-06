@@ -1,20 +1,22 @@
 package storageserver
 
 import (
+	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net"
 	"net/http"
 	"net/rpc"
 	"strconv"
-
-	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"sync"
 )
 
 type storageServer struct {
-	numNodes    int
-	joinedNodes int
-	nodes       []storagerpc.Node
-	chicken     map[string]string
-	duck        map[string]map[string]bool
+	numNodes    	int
+	joinedNodes 	int
+	nodes       	[]storagerpc.Node
+	chickenRanch 	*sync.Mutex
+	duckRanch    	*sync.Mutex
+	chicken     	map[string]string
+	duck        	map[string]map[string]bool
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -48,6 +50,8 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	storageServer.numNodes = numNodes
 	storageServer.nodes = make([]storagerpc.Node, numNodes)
 	storageServer.joinedNodes = 1 // self
+	storageServer.chickenRanch = &sync.Mutex{}
+	storageServer.duckRanch = &sync.Mutex{}
 	storageServer.chicken = make(map[string]string)
 	storageServer.duck = make(map[string]map[string]bool)
 
@@ -87,6 +91,10 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
+
+	ss.chickenRanch.Lock()
+	defer ss.chickenRanch.Unlock()
+
 	if v, ok := ss.chicken[args.Key]; !ok {
 		*reply = storagerpc.GetReply{
 			Status: storagerpc.KeyNotFound,
@@ -102,6 +110,10 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 }
 
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
+
+	ss.chickenRanch.Lock()
+	defer ss.chickenRanch.Unlock()
+
 	if _, ok := ss.chicken[args.Key]; !ok {
 		*reply = storagerpc.DeleteReply{
 			Status: storagerpc.KeyNotFound,
@@ -127,6 +139,10 @@ func Keys(m map[string]bool) []string {
 }
 
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
+
+	ss.duckRanch.Lock()
+	defer ss.duckRanch.Unlock()
+
 	if v, ok := ss.duck[args.Key]; !ok {
 		*reply = storagerpc.GetListReply{
 			Status: storagerpc.KeyNotFound,
@@ -142,6 +158,10 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 }
 
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
+
+	ss.chickenRanch.Lock()
+	defer ss.chickenRanch.Unlock()
+
 	ss.chicken[args.Key] = args.Value
 	*reply = storagerpc.PutReply{
 		Status: storagerpc.OK,
@@ -150,6 +170,10 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 }
 
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
+
+	ss.duckRanch.Lock()
+	defer ss.duckRanch.Unlock()
+
 	if _, ok := ss.duck[args.Key]; !ok {
 		ss.duck[args.Key] = make(map[string]bool)
 	}
@@ -169,6 +193,10 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 }
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
+
+	ss.duckRanch.Lock()
+	defer ss.duckRanch.Unlock()
+
 	if _, ok := ss.duck[args.Key]; !ok {
 		*reply = storagerpc.PutReply{
 			Status: storagerpc.ItemNotFound,
