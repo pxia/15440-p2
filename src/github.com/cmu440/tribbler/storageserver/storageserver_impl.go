@@ -3,6 +3,7 @@ package storageserver
 import (
 	// "errors"
 	"github.com/cmu440/tribbler/datastructure/nodes"
+	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net"
 	"net/http"
@@ -64,7 +65,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 		NodeID:   nodeID,
 	}
 	storageServer.initializer = nodes.NewNodesInitializer(numNodes)
-	storageServer.initializer.Register(storageServer.selfNode)
+	ok := storageServer.initializer.Register(storageServer.selfNode)
 	storageServer.registerLock = &sync.Mutex{}
 	storageServer.initConf = make(chan error, 1)
 	storageServer.chickenRanch = &sync.Mutex{}
@@ -74,7 +75,15 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 
 	if masterServerHostPort != "" {
 		go storageServer.SlaveInitRoutine(masterServerHostPort)
+	} else {
+		if ok {
+			storageServer.ready = true
+			storageServer.nodes = storageServer.initializer.Flush()
+			storageServer.rangeChecker = nodes.NewNodeCollection(storageServer.nodes).RangeChecker(storageServer.selfNode.NodeID)
+			return storageServer, nil
+		}
 	}
+
 	err = <-storageServer.initConf
 	if err != nil {
 		return nil, err
@@ -165,15 +174,23 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 	ss.chickenRanch.Lock()
 	defer ss.chickenRanch.Unlock()
 
-	if v, ok := ss.chicken[args.Key]; !ok {
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.GetReply{
-			Status: storagerpc.KeyNotFound,
-			Value:  "",
+			Status: storagerpc.WrongServer,
 		}
 	} else {
-		*reply = storagerpc.GetReply{
-			Status: storagerpc.OK,
-			Value:  v,
+
+		if v, ok := ss.chicken[args.Key]; !ok {
+			*reply = storagerpc.GetReply{
+				Status: storagerpc.KeyNotFound,
+				Value:  "",
+			}
+		} else {
+			*reply = storagerpc.GetReply{
+				Status: storagerpc.OK,
+				Value:  v,
+			}
 		}
 	}
 	return nil
@@ -184,14 +201,22 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 	ss.chickenRanch.Lock()
 	defer ss.chickenRanch.Unlock()
 
-	if _, ok := ss.chicken[args.Key]; !ok {
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.DeleteReply{
-			Status: storagerpc.KeyNotFound,
+			Status: storagerpc.WrongServer,
 		}
 	} else {
-		delete(ss.chicken, args.Key)
-		*reply = storagerpc.DeleteReply{
-			Status: storagerpc.OK,
+
+		if _, ok := ss.chicken[args.Key]; !ok {
+			*reply = storagerpc.DeleteReply{
+				Status: storagerpc.KeyNotFound,
+			}
+		} else {
+			delete(ss.chicken, args.Key)
+			*reply = storagerpc.DeleteReply{
+				Status: storagerpc.OK,
+			}
 		}
 	}
 	return nil
@@ -213,16 +238,25 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 	ss.duckRanch.Lock()
 	defer ss.duckRanch.Unlock()
 
-	if v, ok := ss.duck[args.Key]; !ok {
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.GetListReply{
-			Status: storagerpc.KeyNotFound,
-			Value:  nil,
+			Status: storagerpc.WrongServer,
 		}
 	} else {
-		*reply = storagerpc.GetListReply{
-			Status: storagerpc.OK,
-			Value:  Keys(v),
+
+		if v, ok := ss.duck[args.Key]; !ok {
+			*reply = storagerpc.GetListReply{
+				Status: storagerpc.KeyNotFound,
+				Value:  nil,
+			}
+		} else {
+			*reply = storagerpc.GetListReply{
+				Status: storagerpc.OK,
+				Value:  Keys(v),
+			}
 		}
+
 	}
 	return nil
 }
@@ -232,9 +266,18 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 	ss.chickenRanch.Lock()
 	defer ss.chickenRanch.Unlock()
 
-	ss.chicken[args.Key] = args.Value
-	*reply = storagerpc.PutReply{
-		Status: storagerpc.OK,
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.WrongServer,
+		}
+	} else {
+
+		ss.chicken[args.Key] = args.Value
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.OK,
+		}
+
 	}
 	return nil
 }
@@ -244,20 +287,28 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 	ss.duckRanch.Lock()
 	defer ss.duckRanch.Unlock()
 
-	if _, ok := ss.duck[args.Key]; !ok {
-		ss.duck[args.Key] = make(map[string]bool)
-	}
-
-	if _, ok := ss.duck[args.Key][args.Value]; ok {
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.PutReply{
-			Status: storagerpc.ItemExists,
+			Status: storagerpc.WrongServer,
 		}
-		return nil
-	}
+	} else {
 
-	ss.duck[args.Key][args.Value] = false
-	*reply = storagerpc.PutReply{
-		Status: storagerpc.OK,
+		if _, ok := ss.duck[args.Key]; !ok {
+			ss.duck[args.Key] = make(map[string]bool)
+		}
+
+		if _, ok := ss.duck[args.Key][args.Value]; ok {
+			*reply = storagerpc.PutReply{
+				Status: storagerpc.ItemExists,
+			}
+			return nil
+		}
+
+		ss.duck[args.Key][args.Value] = false
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.OK,
+		}
 	}
 	return nil
 }
@@ -267,23 +318,32 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 	ss.duckRanch.Lock()
 	defer ss.duckRanch.Unlock()
 
-	if _, ok := ss.duck[args.Key]; !ok {
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.PutReply{
-			Status: storagerpc.ItemNotFound,
+			Status: storagerpc.WrongServer,
 		}
-		return nil
-	}
 
-	if _, ok := ss.duck[args.Key][args.Value]; !ok {
+	} else {
+
+		if _, ok := ss.duck[args.Key]; !ok {
+			*reply = storagerpc.PutReply{
+				Status: storagerpc.ItemNotFound,
+			}
+			return nil
+		}
+
+		if _, ok := ss.duck[args.Key][args.Value]; !ok {
+			*reply = storagerpc.PutReply{
+				Status: storagerpc.ItemNotFound,
+			}
+			return nil
+		}
+
+		delete(ss.duck[args.Key], args.Value)
 		*reply = storagerpc.PutReply{
-			Status: storagerpc.ItemNotFound,
+			Status: storagerpc.OK,
 		}
-		return nil
-	}
-
-	delete(ss.duck[args.Key], args.Value)
-	*reply = storagerpc.PutReply{
-		Status: storagerpc.OK,
 	}
 	return nil
 }
