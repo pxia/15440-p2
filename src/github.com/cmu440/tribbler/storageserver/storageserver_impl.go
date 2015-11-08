@@ -1,22 +1,30 @@
 package storageserver
 
 import (
+	// "errors"
+	"github.com/cmu440/tribbler/datastructure/nodes"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net"
 	"net/http"
 	"net/rpc"
 	"strconv"
 	"sync"
+	"time"
 )
 
 type storageServer struct {
-	numNodes    	int
-	joinedNodes 	int
-	nodes       	[]storagerpc.Node
-	chickenRanch 	*sync.Mutex
-	duckRanch    	*sync.Mutex
-	chicken     	map[string]string
-	duck        	map[string]map[string]bool
+	ready        bool
+	numNodes     int
+	selfNode     storagerpc.Node
+	nodes        []storagerpc.Node
+	rangeChecker func(uint32) bool
+	initializer  *nodes.NodesInitializer
+	initConf     chan error
+	registerLock *sync.Mutex
+	chickenRanch *sync.Mutex
+	duckRanch    *sync.Mutex
+	chicken      map[string]string
+	duck         map[string]map[string]bool
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -42,41 +50,103 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 		return nil, err
 	}
 
+	tcp, _ := net.ResolveTCPAddr("tcp", "localhost:"+strconv.Itoa(port))
+	selfAddr := tcp.String()
+
 	// Setup the HTTP handler that will server incoming RPCs and
 	// serve requests in a background goroutine.
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
 	storageServer.numNodes = numNodes
-	storageServer.nodes = make([]storagerpc.Node, numNodes)
-	storageServer.joinedNodes = 1 // self
+	storageServer.selfNode = storagerpc.Node{
+		HostPort: selfAddr,
+		NodeID:   nodeID,
+	}
+	storageServer.initializer = nodes.NewNodesInitializer(numNodes)
+	storageServer.initializer.Register(storageServer.selfNode)
+	storageServer.registerLock = &sync.Mutex{}
+	storageServer.initConf = make(chan error, 1)
 	storageServer.chickenRanch = &sync.Mutex{}
 	storageServer.duckRanch = &sync.Mutex{}
 	storageServer.chicken = make(map[string]string)
 	storageServer.duck = make(map[string]map[string]bool)
 
-	return storageServer, nil
+	if masterServerHostPort != "" {
+		go storageServer.SlaveInitRoutine(masterServerHostPort)
+	}
+	err = <-storageServer.initConf
+	if err != nil {
+		return nil, err
+	} else {
+		return storageServer, nil
+	}
 }
 
+func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
+
+	ticker := time.NewTicker(time.Second)
+	master, err := rpc.DialHTTP("tcp", masterAddr)
+	if err != nil {
+		ss.initConf <- err
+		return
+	}
+
+	args := &storagerpc.RegisterArgs{ServerInfo: ss.selfNode}
+	var reply storagerpc.RegisterReply
+
+	for {
+		if err := master.Call("StorageServer.RegisterServer", args, &reply); err != nil {
+			ss.initConf <- err
+			ticker.Stop()
+			return
+		}
+
+		if reply.Status == storagerpc.OK {
+			ss.ready = true
+			ss.nodes = reply.Servers
+			ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
+			ss.initConf <- nil
+			ticker.Stop()
+			return
+		}
+
+		<-ticker.C
+	}
+
+}
+
+// assume will not be called on slaves
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	ss.nodes[ss.joinedNodes] = args.ServerInfo
-	ss.joinedNodes++
-	if ss.joinedNodes == ss.numNodes {
+
+	ss.registerLock.Lock()
+	defer ss.registerLock.Unlock()
+
+	ok := ss.initializer.Register(args.ServerInfo)
+
+	if ok {
+		ss.ready = true
+		ss.nodes = ss.initializer.Flush()
+		ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
 		*reply = storagerpc.RegisterReply{
 			Status:  storagerpc.OK,
 			Servers: ss.nodes,
 		}
+		ss.initConf <- nil
 	} else {
 		*reply = storagerpc.RegisterReply{
 			Status:  storagerpc.NotReady,
-			Servers: ss.nodes,
+			Servers: nil,
 		}
 	}
+
+	// CAUTION! might have to return error
 	return nil
+
 }
 
 func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *storagerpc.GetServersReply) error {
-	if ss.joinedNodes == ss.numNodes {
+	if ss.ready {
 		*reply = storagerpc.GetServersReply{
 			Status:  storagerpc.OK,
 			Servers: ss.nodes,
@@ -84,7 +154,7 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 	} else {
 		*reply = storagerpc.GetServersReply{
 			Status:  storagerpc.NotReady,
-			Servers: ss.nodes,
+			Servers: nil,
 		}
 	}
 	return nil
