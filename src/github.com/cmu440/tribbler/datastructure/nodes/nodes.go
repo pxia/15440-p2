@@ -1,7 +1,7 @@
-package main
+package nodes
 
 import (
-	"fmt"
+	// "fmt"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"math"
 	"sort"
@@ -53,17 +53,6 @@ func (ni *NodesInitializer) Flush() []storagerpc.Node {
 		i++
 	}
 	return nodes
-	// nodes := make(nodeSlice, len(ni.n))
-	// sort.Sort(nodes)
-	// var offset uint32
-	// offset = math.MaxUint32 - nodes[len(nodes)-1].NodeID
-	// for _, node := range nodes {
-	// 	node.NodeID += offset
-	// }
-	// return &Nodes{
-	// 	offset: offset,
-	// 	n:      nodes,
-	// }
 }
 
 func NewNodeCollection(nodes []storagerpc.Node) *NodeCollection {
@@ -103,21 +92,4 @@ func (nc *NodeCollection) RangeChecker(NodeID uint32) func(uint32) bool {
 		hashValueOff = hashValue + nc.offset
 		return hashValueOff <= upper && lower < hashValueOff
 	}
-}
-
-func main() {
-	nc := NewNodeCollection([]storagerpc.Node{
-		{NodeID: 5, HostPort: "a"},
-		{NodeID: 10, HostPort: "b"},
-		{NodeID: 15, HostPort: "c"},
-	})
-	checker1 := nc.RangeChecker(5)
-	fmt.Println(checker1(4))
-	fmt.Println(checker1(5))
-	fmt.Println(checker1(6))
-	fmt.Println(checker1(10))
-	checker2 := nc.RangeChecker(10)
-	fmt.Println(checker2(9))
-	fmt.Println(checker2(10))
-	fmt.Println(checker2(11))
 }
