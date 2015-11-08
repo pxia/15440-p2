@@ -85,11 +85,11 @@ func (nc *NodeCollection) RangeChecker(NodeID uint32) func(uint32) bool {
 	if i == 0 {
 		lower = 0
 	} else {
-		lower = nc.n[i-1].NodeID
+		lower = nc.n[i-1].NodeID + 1
 	}
 	return func(hashValue uint32) bool {
 		var hashValueOff uint32
 		hashValueOff = hashValue + nc.offset
-		return hashValueOff <= upper && lower < hashValueOff
+		return hashValueOff <= upper && lower <= hashValueOff
 	}
 }
