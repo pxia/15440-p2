@@ -2,6 +2,7 @@ package storageserver
 
 import (
 	// "errors"
+	"fmt"
 	"github.com/cmu440/tribbler/datastructure/nodes"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
@@ -85,6 +86,16 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	}
 
 	err = <-storageServer.initConf
+	// if masterServerHostPort == "" {
+	// 	for i := 0; i < len(storageServer.nodes); i++ {
+	// 		fmt.Println(storageServer.nodes[i].NodeID)
+	// 	}
+	// 	fmt.Println(len(storageServer.nodes))
+	// 	fmt.Println("master server ready")
+	// }
+
+	// fmt.Println(storageServer.nodes)
+
 	if err != nil {
 		return nil, err
 	} else {
@@ -112,8 +123,10 @@ func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
 		}
 
 		if reply.Status == storagerpc.OK {
+
 			ss.ready = true
 			ss.nodes = reply.Servers
+			fmt.Println(ss.selfNode.NodeID)
 			ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
 			ss.initConf <- nil
 			ticker.Stop()
@@ -137,6 +150,7 @@ func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *st
 		ss.ready = true
 		ss.nodes = ss.initializer.Flush()
 		ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
+
 		*reply = storagerpc.RegisterReply{
 			Status:  storagerpc.OK,
 			Servers: ss.nodes,
