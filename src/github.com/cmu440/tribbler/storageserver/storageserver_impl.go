@@ -2,7 +2,7 @@ package storageserver
 
 import (
 	// "errors"
-	"fmt"
+	// "fmt"
 	"github.com/cmu440/tribbler/datastructure/nodes"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
@@ -21,7 +21,7 @@ type storageServer struct {
 	nodes        []storagerpc.Node
 	rangeChecker func(uint32) bool
 	initializer  *nodes.NodesInitializer
-	initConf     chan error
+	initConfChan chan error
 	registerLock *sync.Mutex
 	chickenRanch *sync.Mutex
 	duckRanch    *sync.Mutex
@@ -68,7 +68,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	storageServer.initializer = nodes.NewNodesInitializer(numNodes)
 	ok := storageServer.initializer.Register(storageServer.selfNode)
 	storageServer.registerLock = &sync.Mutex{}
-	storageServer.initConf = make(chan error, 1)
+	storageServer.initConfChan = make(chan error, 1)
 	storageServer.chickenRanch = &sync.Mutex{}
 	storageServer.duckRanch = &sync.Mutex{}
 	storageServer.chicken = make(map[string]string)
@@ -85,20 +85,12 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 		}
 	}
 
-	err = <-storageServer.initConf
-	// if masterServerHostPort == "" {
-	// 	for i := 0; i < len(storageServer.nodes); i++ {
-	// 		fmt.Println(storageServer.nodes[i].NodeID)
-	// 	}
-	// 	fmt.Println(len(storageServer.nodes))
-	// 	fmt.Println("master server ready")
-	// }
-
-	// fmt.Println(storageServer.nodes)
+	err = <-storageServer.initConfChan
 
 	if err != nil {
 		return nil, err
 	} else {
+		storageServer.ready = true
 		return storageServer, nil
 	}
 }
@@ -108,7 +100,7 @@ func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
 	ticker := time.NewTicker(time.Second)
 	master, err := rpc.DialHTTP("tcp", masterAddr)
 	if err != nil {
-		ss.initConf <- err
+		ss.initConfChan <- err
 		return
 	}
 
@@ -117,7 +109,8 @@ func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
 
 	for {
 		if err := master.Call("StorageServer.RegisterServer", args, &reply); err != nil {
-			ss.initConf <- err
+			// fmt.Println("warning!")
+			ss.initConfChan <- err
 			ticker.Stop()
 			return
 		}
@@ -126,9 +119,8 @@ func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
 
 			ss.ready = true
 			ss.nodes = reply.Servers
-			fmt.Println(ss.selfNode.NodeID)
 			ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
-			ss.initConf <- nil
+			ss.initConfChan <- nil
 			ticker.Stop()
 			return
 		}
@@ -147,7 +139,6 @@ func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *st
 	ok := ss.initializer.Register(args.ServerInfo)
 
 	if ok {
-		ss.ready = true
 		ss.nodes = ss.initializer.Flush()
 		ss.rangeChecker = nodes.NewNodeCollection(ss.nodes).RangeChecker(ss.selfNode.NodeID)
 
@@ -155,7 +146,9 @@ func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *st
 			Status:  storagerpc.OK,
 			Servers: ss.nodes,
 		}
-		ss.initConf <- nil
+		if !ss.ready {
+			ss.initConfChan <- nil
+		}
 	} else {
 		*reply = storagerpc.RegisterReply{
 			Status:  storagerpc.NotReady,

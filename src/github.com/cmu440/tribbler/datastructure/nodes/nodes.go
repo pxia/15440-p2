@@ -2,7 +2,6 @@ package nodes
 
 import (
 	// "fmt"
-	"fmt"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"math"
 	"sort"
@@ -92,8 +91,6 @@ func (nc *NodeCollection) RangeChecker(NodeID uint32) func(uint32) bool {
 	} else {
 		lower = nc.nIDSorted[i-1] + 1
 	}
-	fmt.Println(i, lower-nc.offset, upper-nc.offset, NodeID)
-	fmt.Println(nc.nIDSorted)
 	return func(hashValue uint32) bool {
 		var hashValueOff uint32
 		hashValueOff = hashValue + nc.offset
