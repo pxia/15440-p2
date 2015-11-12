@@ -459,8 +459,20 @@ func (ss *storageServer) Revoke(key string, list []string) {
 		Key: key,
 	}
 
+	c := make(chan bool, len(list))
+	for _, hostport := range list {
+		svr := ss.rpcCache.Try(hostport)
+		go func() {
+			svr.Call("LeaseCallbacks.RevokeLease", &args, &reply)
+			c <- true
+		}()
+	}
+	a := time.After(time.Duration(storagerpc.LeaseSeconds+storagerpc.LeaseGuardSeconds) * time.Second)
 	for i := 0; i < len(list); i++ {
-		svr := ss.rpcCache.Try(list[i])
-		svr.Call("LeaseCallbacks.RevokeLease", &args, &reply)
+		select {
+		case <-a:
+			return
+		case <-c:
+		}
 	}
 }
