@@ -27,6 +27,7 @@ type libstore struct {
 	cache         *cache.Cache
 	nodes         *nodes.NodeCollection
 	rpcPool       *conns.RpcPool
+	mode          LeaseMode
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -78,6 +79,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	libstore := new(libstore)
 	libstore.nodes = nodes.NewNodeCollection(reply.Servers)
 	rpc.RegisterName("LeaseCallbacks", librpc.Wrap(libstore))
+	libstore.mode = mode
 	libstore.storageServer = cli
 	libstore.rpcPool = conns.NewRPCPool()
 	libstore.rpcPool.Add(masterServerHostPort, cli)
@@ -87,8 +89,20 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	return libstore, nil
 }
 
+// sick util function
 func (ls *libstore) r(key string) *rpc.Client {
 	return ls.rpcPool.Try(ls.nodes.Route(StoreHash(key)))
+}
+
+func (ls *libstore) l(wantLease bool) bool {
+	switch ls.mode {
+	case Never:
+		return false
+	case Always:
+		return true
+	default:
+		return wantLease
+	}
 }
 
 func (ls *libstore) Get(key string) (string, error) {
@@ -96,7 +110,7 @@ func (ls *libstore) Get(key string) (string, error) {
 	if v, ok, wl := ls.cache.Get(key); ok {
 		return v.(string), nil
 	} else {
-		wantLease = wl
+		wantLease = ls.l(wl)
 	}
 
 	args := &storagerpc.GetArgs{
@@ -182,7 +196,7 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	if v, ok, wl := ls.cache.Get(key); ok {
 		return v.([]string), nil
 	} else {
-		wantLease = wl
+		wantLease = ls.l(wl)
 	}
 
 	args := &storagerpc.GetArgs{
