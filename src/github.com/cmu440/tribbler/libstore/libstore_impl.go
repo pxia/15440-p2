@@ -3,9 +3,13 @@ package libstore
 import (
 	"errors"
 	"fmt"
+	"github.com/cmu440/tribbler/datastructure/cache"
+	"github.com/cmu440/tribbler/datastructure/conns"
+	"github.com/cmu440/tribbler/datastructure/nodes"
 	"github.com/cmu440/tribbler/rpc/librpc"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net/rpc"
+	"time"
 )
 
 var (
@@ -20,6 +24,9 @@ var (
 type libstore struct {
 	storageServer *rpc.Client
 	myHostPort    string
+	cache         *cache.Cache
+	nodes         *nodes.NodeCollection
+	rpcPool       *conns.RpcPool
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -52,23 +59,54 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	if err != nil {
 		return nil, err
 	}
+
+	ticker := time.NewTicker(time.Second)
+	args := &storagerpc.GetServersArgs{}
+	var reply storagerpc.GetServersReply
+	for i := 0; i < 5; i++ {
+		cli.Call("StorageServer.GetServers", args, &reply)
+		if reply.Status == storagerpc.OK {
+			break
+		}
+		<-ticker.C
+	}
+	ticker.Stop()
+	if reply.Status != storagerpc.OK {
+		return nil, errors.New("Unable to establish connection")
+	}
+
 	libstore := new(libstore)
+	libstore.nodes = nodes.NewNodeCollection(reply.Servers)
 	rpc.RegisterName("LeaseCallbacks", librpc.Wrap(libstore))
 	libstore.storageServer = cli
+	libstore.rpcPool = conns.NewRPCPool()
+	libstore.rpcPool.Add(masterServerHostPort, cli)
 	libstore.myHostPort = myHostPort
+	libstore.cache = cache.NewCache(storagerpc.QueryCacheSeconds, storagerpc.QueryCacheThresh)
 
 	return libstore, nil
 }
 
+func (ls *libstore) r(key string) *rpc.Client {
+	return ls.rpcPool.Try(ls.nodes.Route(StoreHash(key)))
+}
+
 func (ls *libstore) Get(key string) (string, error) {
+	var wantLease bool
+	if v, ok, wl := ls.cache.Get(key); ok {
+		return v.(string), nil
+	} else {
+		wantLease = wl
+	}
+
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: false,
+		WantLease: wantLease,
 		HostPort:  ls.myHostPort,
 	}
 	var reply storagerpc.GetReply
 
-	if err := ls.storageServer.Call("StorageServer.Get", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.Get", args, &reply); err != nil {
 		return "", err
 	}
 
@@ -78,6 +116,9 @@ func (ls *libstore) Get(key string) (string, error) {
 
 	switch reply.Status {
 	case storagerpc.OK:
+		if reply.Lease.Granted {
+			ls.cache.Put(key, reply.Value, reply.Lease.ValidSeconds)
+		}
 		return reply.Value, nil
 	case storagerpc.KeyNotFound:
 		return "", KeyError
@@ -96,12 +137,13 @@ func (ls *libstore) Put(key, value string) error {
 	}
 	var reply storagerpc.PutReply
 
-	if err := ls.storageServer.Call("StorageServer.Put", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.Put", args, &reply); err != nil {
 		return err
 	}
 
 	switch reply.Status {
 	case storagerpc.OK:
+		ls.cache.Delete(key)
 		return nil
 	case storagerpc.WrongServer:
 		return RoutingError
@@ -116,19 +158,19 @@ func (ls *libstore) Delete(key string) error {
 	}
 	var reply storagerpc.DeleteReply
 
-	if err := ls.storageServer.Call("StorageServer.Delete", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.Delete", args, &reply); err != nil {
 		return err
 	}
 
 	switch reply.Status {
 	case storagerpc.OK:
+		ls.cache.Delete(key)
 		return nil
 	case storagerpc.WrongServer:
 		return RoutingError
 	case storagerpc.KeyNotFound:
 		return KeyError
 	default:
-		fmt.Println(reply.Status)
 		return ProtocolError
 	}
 
@@ -136,19 +178,29 @@ func (ls *libstore) Delete(key string) error {
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {
+	var wantLease bool
+	if v, ok, wl := ls.cache.Get(key); ok {
+		return v.([]string), nil
+	} else {
+		wantLease = wl
+	}
+
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: false,
+		WantLease: wantLease,
 		HostPort:  ls.myHostPort,
 	}
 	var reply storagerpc.GetListReply
 
-	if err := ls.storageServer.Call("StorageServer.GetList", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.GetList", args, &reply); err != nil {
 		return nil, err
 	}
 
 	switch reply.Status {
 	case storagerpc.OK:
+		if reply.Lease.Granted {
+			ls.cache.Put(key, reply.Value, reply.Lease.ValidSeconds)
+		}
 		return reply.Value, nil
 	case storagerpc.WrongServer:
 		return nil, RoutingError
@@ -167,12 +219,13 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 	}
 	var reply storagerpc.PutReply
 
-	if err := ls.storageServer.Call("StorageServer.RemoveFromList", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.RemoveFromList", args, &reply); err != nil {
 		return err
 	}
 
 	switch reply.Status {
 	case storagerpc.OK:
+		ls.cache.Delete(key)
 		return nil
 	case storagerpc.WrongServer:
 		return RoutingError
@@ -197,12 +250,13 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 	}
 	var reply storagerpc.PutReply
 
-	if err := ls.storageServer.Call("StorageServer.AppendToList", args, &reply); err != nil {
+	if err := ls.r(key).Call("StorageServer.AppendToList", args, &reply); err != nil {
 		return err
 	}
 
 	switch reply.Status {
 	case storagerpc.OK:
+		ls.cache.Delete(key)
 		return nil
 	case storagerpc.WrongServer:
 		return RoutingError
@@ -214,7 +268,11 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
-	return errors.New("not implemented")
+	ls.cache.Delete(args.Key)
+	*reply = storagerpc.RevokeLeaseReply{
+		Status: storagerpc.OK,
+	}
+	return nil
 }
 
 func NotDataError(e error) bool {
