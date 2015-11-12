@@ -44,7 +44,7 @@ type storageServer struct {
 	valLock      *sync.Mutex
 	listLock     *sync.Mutex
 	valTable     map[string]*valEntry
-	listTable    map[string]listEntry
+	listTable    map[string]*listEntry
 	rpcCache     *conns.RpcPool
 }
 
@@ -91,7 +91,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	storageServer.valLock = &sync.Mutex{}
 	storageServer.listLock = &sync.Mutex{}
 	storageServer.valTable = make(map[string]*valEntry)
-	storageServer.listTable = make(map[string]listEntry)
+	storageServer.listTable = make(map[string]*listEntry)
 	storageServer.rpcCache = conns.NewRPCPool()
 
 	if masterServerHostPort != "" {
@@ -223,8 +223,6 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 				reply.Lease.Granted = true
 				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
 				v.leasePool.Put(args.HostPort, nil, exptime)
-			} else {
-				reply.Lease.Granted = false
 			}
 
 			v.readLock.Unlock()
@@ -268,7 +266,6 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 	return nil
 }
 
-// TODO: what if the key exists in the pool?
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	hash := libstore.StoreHash(args.Key)
 	if rangeOK := ss.rangeChecker(hash); !rangeOK {
@@ -279,9 +276,7 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 
 		ss.valLock.Lock()
 		v, ok := ss.valTable[args.Key]
-		// ss.valLock.Unlock()
 		if !ok {
-			// ss.valLock.Lock()
 			ss.valTable[args.Key] = &valEntry{
 				v:         args.Value,
 				revoking:  false,
@@ -337,14 +332,14 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 	} else {
 
 		ss.listLock.Lock()
+		defer ss.listLock.Unlock()
+
 		v, ok := ss.listTable[args.Key]
-		ss.listLock.Unlock()
 
 		if !ok {
-			*reply = storagerpc.GetListReply{
-				Status: storagerpc.KeyNotFound,
-				Value:  nil,
-			}
+
+			reply.Status = storagerpc.KeyNotFound
+
 		} else {
 
 			v.readLock.Lock()
@@ -354,8 +349,9 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 
 			if args.WantLease && (!v.revoking) {
 				reply.Lease.Granted = true
-				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
-				// TODO: add to lease pool
+				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
+				exptime := storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
+				v.leasePool.Put(args.HostPort, nil, exptime)
 			}
 
 			v.readLock.Unlock()
@@ -378,7 +374,7 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 		ss.listLock.Lock()
 		entry, ok := ss.listTable[args.Key]
 		if !ok {
-			entry = listEntry{
+			entry = &listEntry{
 				l:         make(map[string]bool),
 				revoking:  false,
 				readLock:  &sync.Mutex{},
@@ -386,22 +382,31 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 				leasePool: cache.NewTickMap(),
 			}
 			ss.listTable[args.Key] = entry
-		}
-		ss.listLock.Unlock()
+			entry.l[args.Value] = false
+			ss.listLock.Unlock()
+		} else {
+			ss.listLock.Unlock()
 
-		entry.writeLock.Lock()
-		entry.readLock.Lock()
-		defer entry.readLock.Unlock()
-		defer entry.writeLock.Unlock()
-
-		if _, ok := ss.listTable[args.Key].l[args.Value]; ok {
-			*reply = storagerpc.PutReply{
-				Status: storagerpc.ItemExists,
+			if _, ok := ss.listTable[args.Key].l[args.Value]; ok {
+				*reply = storagerpc.PutReply{
+					Status: storagerpc.ItemExists,
+				}
+				return nil
 			}
-			return nil
+
+			entry.writeLock.Lock()
+			entry.revoking = true
+			ss.Revoke(args.Key, entry.leasePool.Freeze())
+
+			entry.readLock.Lock()
+			entry.l[args.Value] = false
+			entry.revoking = false
+			entry.leasePool.Clear()
+
+			entry.readLock.Unlock()
+			entry.writeLock.Unlock()
 		}
 
-		ss.listTable[args.Key].l[args.Value] = false
 		*reply = storagerpc.PutReply{
 			Status: storagerpc.OK,
 		}
@@ -429,23 +434,32 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 				Status: storagerpc.ItemNotFound,
 			}
 			return nil
-		}
-
-		entry.writeLock.Lock()
-		entry.readLock.Lock()
-		defer entry.readLock.Unlock()
-		defer entry.writeLock.Unlock()
-
-		if _, ok := ss.listTable[args.Key].l[args.Value]; !ok {
-			*reply = storagerpc.PutReply{
-				Status: storagerpc.ItemNotFound,
+		} else {
+			entry.readLock.Lock()
+			if _, ok := ss.listTable[args.Key].l[args.Value]; !ok {
+				*reply = storagerpc.PutReply{
+					Status: storagerpc.ItemNotFound,
+				}
+				entry.readLock.Unlock()
+				return nil
 			}
-			return nil
-		}
+			entry.readLock.Unlock()
 
-		delete(ss.listTable[args.Key].l, args.Value)
-		*reply = storagerpc.PutReply{
-			Status: storagerpc.OK,
+			entry.writeLock.Lock()
+			entry.revoking = true
+			ss.Revoke(args.Key, entry.leasePool.Freeze())
+
+			entry.readLock.Lock()
+			delete(ss.listTable[args.Key].l, args.Value)
+			entry.revoking = false
+			entry.leasePool.Clear()
+
+			entry.readLock.Unlock()
+			entry.writeLock.Unlock()
+
+			*reply = storagerpc.PutReply{
+				Status: storagerpc.OK,
+			}
 		}
 
 	}
