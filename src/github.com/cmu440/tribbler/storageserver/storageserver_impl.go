@@ -3,6 +3,8 @@ package storageserver
 import (
 	// "errors"
 	// "fmt"
+	"github.com/cmu440/tribbler/datastructure/cache"
+	"github.com/cmu440/tribbler/datastructure/conns"
 	"github.com/cmu440/tribbler/datastructure/nodes"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
@@ -19,6 +21,7 @@ type valEntry struct {
 	revoking  bool
 	writeLock *sync.Mutex
 	readLock  *sync.Mutex
+	leasePool *cache.TickMap
 }
 
 type listEntry struct {
@@ -26,6 +29,7 @@ type listEntry struct {
 	revoking  bool
 	writeLock *sync.Mutex
 	readLock  *sync.Mutex
+	leasePool *cache.TickMap
 }
 
 type storageServer struct {
@@ -41,6 +45,7 @@ type storageServer struct {
 	listLock     *sync.Mutex
 	valTable     map[string]valEntry
 	listTable    map[string]listEntry
+	rpcCache     *conns.RpcPool
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -87,6 +92,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	storageServer.listLock = &sync.Mutex{}
 	storageServer.valTable = make(map[string]valEntry)
 	storageServer.listTable = make(map[string]listEntry)
+	storageServer.rpcCache = conns.NewRPCPool()
 
 	if masterServerHostPort != "" {
 		go storageServer.SlaveInitRoutine(masterServerHostPort)
@@ -123,7 +129,6 @@ func (ss *storageServer) SlaveInitRoutine(masterAddr string) {
 
 	for {
 		if err := master.Call("StorageServer.RegisterServer", args, &reply); err != nil {
-			// fmt.Println("warning!")
 			ss.initConfChan <- err
 			ticker.Stop()
 			return
@@ -214,10 +219,13 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 			reply.Status = storagerpc.OK
 			reply.Value = v.v
 
-			// TODO: check if grant lease
 			if args.WantLease && (!v.revoking) {
+				exptime := storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
 				reply.Lease.Granted = true
-				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
+				reply.Lease.ValidSeconds = exptime
+				v.leasePool.Put(args.HostPort, nil, exptime)
+			} else {
+				reply.Lease.Granted = false
 			}
 
 			v.readLock.Unlock()
@@ -230,17 +238,15 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 // TODO: check for conflicts & race, need to revoke!
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
 
-	ss.valLock.Lock()
-	defer ss.valLock.Unlock()
-
 	hash := libstore.StoreHash(args.Key)
 	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.DeleteReply{
 			Status: storagerpc.WrongServer,
 		}
 	} else {
-
-		if _, ok := ss.valTable[args.Key]; !ok {
+		ss.valLock.Lock()
+		v, ok := ss.valTable[args.Key]
+		if !ok {
 			*reply = storagerpc.DeleteReply{
 				Status: storagerpc.KeyNotFound,
 			}
@@ -250,6 +256,64 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 				Status: storagerpc.OK,
 			}
 		}
+
+		ss.valLock.Unlock()
+
+		v.writeLock.Lock()
+		v.readLock.Lock()
+		ss.Revoke(args.Key, v.leasePool.Freeze())
+		v.readLock.Unlock()
+		v.writeLock.Unlock()
+
+	}
+	return nil
+}
+
+// TODO: what if the key exists in the pool?
+func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
+
+	hash := libstore.StoreHash(args.Key)
+	if rangeOK := ss.rangeChecker(hash); !rangeOK {
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.WrongServer,
+		}
+	} else {
+
+		ss.valLock.Lock()
+		v, ok := ss.valTable[args.Key]
+		ss.valLock.Unlock()
+
+		if !ok {
+			ss.valLock.Lock()
+			ss.valTable[args.Key] = valEntry{
+				v:         args.Value,
+				revoking:  false,
+				readLock:  &sync.Mutex{},
+				writeLock: &sync.Mutex{},
+				leasePool: cache.NewTickMap(),
+			}
+			ss.valLock.Unlock()
+
+		} else {
+
+			v.revoking = true
+			v.writeLock.Lock()
+			ss.Revoke(args.Key, v.leasePool.Freeze())
+
+			v.readLock.Lock()
+			v.v = args.Value
+			v.revoking = false
+			v.leasePool.Clear()
+
+			v.readLock.Unlock()
+			v.writeLock.Unlock()
+
+		}
+
+		*reply = storagerpc.PutReply{
+			Status: storagerpc.OK,
+		}
+
 	}
 	return nil
 }
@@ -290,41 +354,14 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 			reply.Status = storagerpc.OK
 			reply.Value = Keys(v.l)
 
-			// TODO: check if grant lease
 			if args.WantLease && (!v.revoking) {
 				reply.Lease.Granted = true
 				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
+				// TODO: add to lease pool
 			}
 
 			v.readLock.Unlock()
 
-		}
-
-	}
-	return nil
-}
-
-// TODO: what if the key exists in the pool?
-func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-
-	hash := libstore.StoreHash(args.Key)
-	if rangeOK := ss.rangeChecker(hash); !rangeOK {
-		*reply = storagerpc.PutReply{
-			Status: storagerpc.WrongServer,
-		}
-	} else {
-
-		ss.valLock.Lock()
-		defer ss.valLock.Unlock()
-
-		ss.valTable[args.Key] = valEntry{
-			v:         args.Value,
-			revoking:  false,
-			readLock:  &sync.Mutex{},
-			writeLock: &sync.Mutex{},
-		}
-		*reply = storagerpc.PutReply{
-			Status: storagerpc.OK,
 		}
 
 	}
@@ -348,6 +385,7 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 				revoking:  false,
 				readLock:  &sync.Mutex{},
 				writeLock: &sync.Mutex{},
+				leasePool: cache.NewTickMap(),
 			}
 			ss.listTable[args.Key] = entry
 		}
@@ -414,4 +452,17 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 
 	}
 	return nil
+}
+
+func (ss *storageServer) Revoke(key string, list []string) {
+
+	var reply storagerpc.RegisterReply
+	args := storagerpc.RevokeLeaseArgs{
+		Key: key,
+	}
+
+	for i := 0; i < len(list); i++ {
+		svr := ss.rpcCache.Try(list[i])
+		svr.Call("LeaseCallbacks.RevokeLease", &args, &reply)
+	}
 }
