@@ -150,11 +150,20 @@ func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *
 }
 
 func (ts *tribServer) GetSubscriptions(args *tribrpc.GetSubscriptionsArgs, reply *tribrpc.GetSubscriptionsReply) error {
-	list, err := ts.libStore.GetList(util.FormatSubListKey(args.UserID))
-
-	if err == libstore.KeyError {
+	if t, err := ts.userNotFound(args.UserID); err != nil {
+		return err
+	} else if t {
 		*reply = tribrpc.GetSubscriptionsReply{
 			Status: tribrpc.NoSuchUser,
+		}
+		return nil
+	}
+
+	list, err := ts.libStore.GetList(util.FormatSubListKey(args.UserID))
+	if err == libstore.KeyError {
+		*reply = tribrpc.GetSubscriptionsReply{
+			Status:  tribrpc.OK,
+			UserIDs: nil,
 		}
 	} else {
 		*reply = tribrpc.GetSubscriptionsReply{
