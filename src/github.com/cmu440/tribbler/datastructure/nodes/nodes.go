@@ -71,11 +71,11 @@ func NewNodeCollection(nodes []storagerpc.Node) *NodeCollection {
 	}
 }
 
-func (nc *NodeCollection) Route(hashValue uint32) *storagerpc.Node {
+func (nc *NodeCollection) Route(hashValue uint32) string {
 	var hashValueOff uint32
 	hashValueOff = hashValue + nc.offset
 	i := sort.Search(len(nc.nIDSorted), func(i int) bool { return hashValueOff <= nc.nIDSorted[i] })
-	return &nc.nodesSorted[i]
+	return nc.nodesSorted[i].HostPort
 }
 
 func (nc *NodeCollection) RangeChecker(NodeID uint32) func(uint32) bool {
