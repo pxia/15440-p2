@@ -122,12 +122,13 @@ func (c *TickMap) Put(key string, value interface{}, validSecs int) {
 	exp := time.Now().Add(d)
 	c.mlock.Lock()
 	go func() {
+		cc := *c
 		<-time.After(d)
-		c.mlock.Lock()
-		if c.m[key].expiration == exp {
-			delete(c.m, key)
+		cc.mlock.Lock()
+		if cc.m[key].expiration == exp {
+			delete(cc.m, key)
 		}
-		c.mlock.Unlock()
+		cc.mlock.Unlock()
 	}()
 	c.m[key] = &Value{
 		V:          value,
@@ -142,9 +143,22 @@ func (c *TickMap) Delete(key string) {
 	c.mlock.Unlock()
 }
 
-// func (c *TickMap) Map(f func(string, interface{})) {
+// return all the keys
+func (c *TickMap) Freeze() []string {
+	c.mlock.Lock()
+	defer c.mlock.Unlock()
+	s := make([]string, len(c.m))
+	i := 0
+	for key, _ := range c.m {
+		s[i] = key
+		i++
+	}
+	return s
+}
 
-// }
+func (c *TickMap) Clear() {
+	c = NewTickMap()
+}
 
 type Cache struct {
 	c *Counter
