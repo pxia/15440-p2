@@ -43,7 +43,7 @@ type storageServer struct {
 	registerLock *sync.Mutex
 	valLock      *sync.Mutex
 	listLock     *sync.Mutex
-	valTable     map[string]valEntry
+	valTable     map[string]*valEntry
 	listTable    map[string]listEntry
 	rpcCache     *conns.RpcPool
 }
@@ -90,7 +90,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 	storageServer.initConfChan = make(chan error, 1)
 	storageServer.valLock = &sync.Mutex{}
 	storageServer.listLock = &sync.Mutex{}
-	storageServer.valTable = make(map[string]valEntry)
+	storageServer.valTable = make(map[string]*valEntry)
 	storageServer.listTable = make(map[string]listEntry)
 	storageServer.rpcCache = conns.NewRPCPool()
 
@@ -196,7 +196,6 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-
 	hash := libstore.StoreHash(args.Key)
 	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.GetReply{
@@ -205,8 +204,8 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 	} else {
 
 		ss.valLock.Lock()
+		defer ss.valLock.Unlock()
 		v, ok := ss.valTable[args.Key]
-		ss.valLock.Unlock()
 
 		if !ok {
 
@@ -222,7 +221,7 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 			if args.WantLease && (!v.revoking) {
 				exptime := storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
 				reply.Lease.Granted = true
-				reply.Lease.ValidSeconds = exptime
+				reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
 				v.leasePool.Put(args.HostPort, nil, exptime)
 			} else {
 				reply.Lease.Granted = false
@@ -271,7 +270,6 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 
 // TODO: what if the key exists in the pool?
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-
 	hash := libstore.StoreHash(args.Key)
 	if rangeOK := ss.rangeChecker(hash); !rangeOK {
 		*reply = storagerpc.PutReply{
@@ -281,11 +279,10 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 
 		ss.valLock.Lock()
 		v, ok := ss.valTable[args.Key]
-		ss.valLock.Unlock()
-
+		// ss.valLock.Unlock()
 		if !ok {
-			ss.valLock.Lock()
-			ss.valTable[args.Key] = valEntry{
+			// ss.valLock.Lock()
+			ss.valTable[args.Key] = &valEntry{
 				v:         args.Value,
 				revoking:  false,
 				readLock:  &sync.Mutex{},
@@ -295,9 +292,10 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 			ss.valLock.Unlock()
 
 		} else {
+			ss.valLock.Unlock()
 
-			v.revoking = true
 			v.writeLock.Lock()
+			v.revoking = true
 			ss.Revoke(args.Key, v.leasePool.Freeze())
 
 			v.readLock.Lock()
@@ -456,7 +454,7 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 
 func (ss *storageServer) Revoke(key string, list []string) {
 
-	var reply storagerpc.RegisterReply
+	var reply storagerpc.RevokeLeaseReply
 	args := storagerpc.RevokeLeaseArgs{
 		Key: key,
 	}
